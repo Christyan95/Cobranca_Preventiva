@@ -1,0 +1,1065 @@
+{
+  "name": "Cobrança Preventiva",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ⏺️ Telemetria de Execução\nAciona ao término do fluxo o subworkflow de observabilidade para registro centralizado de métricas de execução.",
+        "height": 320,
+        "width": 288,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        13520,
+        4512
+      ],
+      "typeVersion": 1,
+      "id": "00000000-0000-0000-0000-000000000001",
+      "name": "Nota Telemetria"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "{{WORKFLOW_ID_OBSERVABILITY}}",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/{{WORKFLOW_ID_OBSERVABILITY}}",
+          "cachedResultName": "Subworkflow Observabilidade"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "PARENT_WORKFLOW_ID": "={{ $workflow.id }}",
+            "PARENT_WORKFLOW_NAME": "={{ $workflow.name }}",
+            "PARENT_EXECUTION_ID": "={{ $execution.id }}",
+            "PARENT_MODE": "={{ $execution.mode }}",
+            "PARENT_ITEM_COUNT": "={{ $input.all().length }}"
+          }
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        13584,
+        4656
+      ],
+      "id": "00000000-0000-0000-0000-000000000002",
+      "name": "21. Registrar Telemetria",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "content": "## 🟣 1. GATILHO, PARÂMETROS E CALENDÁRIO ÚTIL\n**Objetivo:** Executar de segunda a sexta às 17h00, carregar parâmetros operacionais via variáveis de ambiente (`$env`) e validar feriados para antecipação automática ao último dia útil anterior.\n\n- **Agendamento:** `0 0 17 * * 1-5` (`America/Sao_Paulo`)\n- **Feriados:** BrasilAPI (com fallback nacional fixo) + feriados locais configuráveis\n- **Parâmetros de Homologação (`02. Parâmetros Globais`):**\n  - `data_simulacao_iso`: manter vazio (`\"\"`) em produção.\n  - `modo_teste_forcar_janela`: manter `false` em produção.",
+        "height": 676,
+        "width": 1104,
+        "color": 7
+      },
+      "id": "00000000-0000-0000-0000-000000000003",
+      "name": "Nota Calendário",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        6864,
+        4512
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🔵 2. EXTRAÇÃO ERP (`VW_ERP_CONTAS_RECEBER` + `ERP_PARCEIROS` + `ERP_CLIENTES_LOJA`)\n**Objetivo:** Extrair em consulta única CTE (Read-Only no Oracle ERP) os títulos de **Débito (`D`)** a vencer, **Créditos/Adiantamentos (`C`)** em aberto, filial (`CODI_EMP`) e as 3 colunas de telefone (`TEL1_TRA`, `TEL2_TRA`, `CFO1_TRA`) dos clientes na janela `D-10` / `D-5`.\n\n**Filtros aplicados:**\n- **Saldo em Aberto:** `ABS(NVL(VLAB_REC, 0)) > 0`\n- **Tipos de Documento (`CODI_TDO`):** códigos habilitados na configuração\n- **Modalidades Excluídas (`CODI_TCO`):** carteiras estruturadas/especiais excluídas\n- **Representante Excluído (`COD1_PES`):** carteiras específicas excluídas\n- **Prazo Mínimo (`> 15` dias — Apenas Débitos `D`):** `(TRIM(UPPER(TIPO_TDO)) = 'C' OR (TRUNC(VENC_REC) - TRUNC(DATA_CBR)) > 15)`",
+        "height": 676,
+        "width": 952,
+        "color": 6
+      },
+      "id": "00000000-0000-0000-0000-000000000004",
+      "name": "Nota Extração ERP",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        8048,
+        4512
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🟠 3. CONTROLE POSTGRESQL (`\"AUTOMATION\".\"AVIS_COBR\"`) + COMPENSAÇÃO FIFO + REPESCAGEM\n**Objetivo:**\n1. Consultar histórico em `\"AUTOMATION\".\"AVIS_COBR\"` para garantir idempotência dos registros `ENVIADO` e identificar `PENDENTE`, `SEM_WHATSAPP` ou `NAO_ENTREGUE` elegíveis para **Repescagem Automática**.\n2. Somar Créditos (`TIPO_TDO = 'C'`) e abater nos Débitos (`TIPO_TDO = 'D'`) por vencimento em ordem cronológica (FIFO).\n3. Higienizar as 3 colunas de telefone (`TEL1_TRA`, `TEL2_TRA`, `CFO1_TRA`), removendo zeros antes do DDD e elegendo **apenas 1 número** por prioridade:\n   - **Tier 1:** Celular 9 dígitos nativo (`XX 9XXXX-XXXX`)\n   - **Tier 2:** Celular 8 dígitos (`XX [6-9]XXX-XXXX`, normalizado com `9`)\n   - **Tier 3:** Telefone Fixo (`XX [2-5]XXX-XXXX`)",
+        "height": 676,
+        "width": 988,
+        "color": 3
+      },
+      "id": "00000000-0000-0000-0000-000000000005",
+      "name": "Nota Motor FIFO",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        9056,
+        4512
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🟢 4. VALIDAÇÃO WHATSAPP (`phone-exists`), DISPARO Z-API E AUDITORIA POSTGRESQL\n**Objetivo:**\n1. Validar formato do telefone selecionado (`14. Telefone Válido?`).\n2. Consultar na Z-API (`GET /phone-exists/{phone}`) se o número possui conta ativa no WhatsApp (`14b. Verificar WhatsApp` + `14c. Possui WhatsApp?`).\n3. Enviar mensagem consolidada com o **Saldo Devedor Resultante** via **Z-API** (`/send-text`) com cadência Anti-Ban (`delayTyping` + espera aleatória de 15s a 35s).\n4. Registrar status (`ENVIADO`, `SEM_WHATSAPP`, `NAO_ENTREGUE` ou `PENDENTE`) em `\"AUTOMATION\".\"AVIS_COBR\"` e `\"AUTOMATION\".\"COBR_HIST\"`.",
+        "height": 684,
+        "width": 2028,
+        "color": 4
+      },
+      "id": "00000000-0000-0000-0000-000000000006",
+      "name": "Nota Disparo WhatsApp",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        10112,
+        4512
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🔴 5. RELATÓRIO EM EXCEL (.XLSX) E E-MAIL PADRONIZADO (MICROSOFT OUTLOOK)\n**Objetivo:**\n1. Consolidar os indicadores da execução (`ENVIADO`, `SEM_WHATSAPP`, `PENDENTE`, `NAO_ENTREGUE`) e montar o **E-mail HTML Institucional**.\n2. Estruturar todos os registros processados em **Planilha Excel (`.xlsx`)** ordenada por prioridade de atuação cadastral.\n3. Enviar o resumo executivo com a planilha em anexo via **Microsoft Outlook** para as listas configuradas via variáveis de ambiente.",
+        "height": 688,
+        "width": 1240,
+        "color": 2
+      },
+      "id": "00000000-0000-0000-0000-000000000007",
+      "name": "Nota Relatório Executivo",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        12208,
+        4512
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 17 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-0000-0000-000000000008",
+      "name": "01. Agendador Diário",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        6928,
+        4816
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-docs",
+              "name": "codi_tdo_permitidos",
+              "value": "=[101, 102, 103]",
+              "type": "array"
+            },
+            {
+              "id": "cfg-cobranca-excl",
+              "name": "codi_tco_excluidos",
+              "value": "=[10, 20, 30, 40]",
+              "type": "array"
+            },
+            {
+              "id": "cfg-vendedor-excl",
+              "name": "cod1_pes_excluidos",
+              "value": "=[999]",
+              "type": "array"
+            },
+            {
+              "id": "cfg-prazo-min",
+              "name": "prazo_minimo_exclusao_dias",
+              "value": 15,
+              "type": "number"
+            },
+            {
+              "id": "cfg-etapas",
+              "name": "etapas_dias_antecedencia",
+              "value": "=[10, 5]",
+              "type": "array"
+            },
+            {
+              "id": "cfg-telefone-suporte",
+              "name": "telefone_contato_financeiro",
+              "value": "={{ $env.FINANCE_SUPPORT_PHONE || '(00) 90000-0000' }}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-feriados-locais",
+              "name": "feriados_municipais_estaduais",
+              "value": "={{ $env.LOCAL_HOLIDAYS_JSON || '[\"2026-11-20\"]' }}",
+              "type": "array"
+            },
+            {
+              "id": "cfg-destinatarios-relatorio",
+              "name": "destinatarios_relatorio_email",
+              "value": "={{ $env.REPORT_TO_RECIPIENTS_JSON || '[{\"nome\": \"Equipe Financeira\", \"email\": \"financeiro@empresa.exemplo.com\"}]' }}",
+              "type": "array"
+            },
+            {
+              "id": "cfg-zapi-instance",
+              "name": "zapi_instance_id",
+              "value": "={{ $env.ZAPI_INSTANCE_ID }}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-zapi-token",
+              "name": "zapi_token",
+              "value": "={{ $env.ZAPI_INSTANCE_TOKEN }}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-zapi-client-token",
+              "name": "zapi_client_token",
+              "value": "={{ $env.ZAPI_CLIENT_TOKEN }}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-delay-min",
+              "name": "delay_min_segundos",
+              "value": 15,
+              "type": "number"
+            },
+            {
+              "id": "cfg-delay-max",
+              "name": "delay_max_segundos",
+              "value": 35,
+              "type": "number"
+            },
+            {
+              "id": "cfg-modo-teste",
+              "name": "modo_teste_forcar_janela",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "cfg-data-simulacao",
+              "name": "data_simulacao_iso",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-copias-relatorio",
+              "name": "copias_relatorio_email",
+              "value": "={{ $env.REPORT_BCC_RECIPIENTS_JSON || '[{\"nome\": \"Auditoria Operacional\", \"email\": \"auditoria@empresa.exemplo.com\"}]' }}",
+              "type": "array"
+            },
+            {
+              "id": "cfg-assets-base-url",
+              "name": "url_base_assets_email",
+              "value": "={{ $env.BRAND_ASSETS_BASE_URL || 'https://assets.empresa.exemplo.com/email' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-0000-0000-000000000009",
+      "name": "02. Parâmetros Globais",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        7152,
+        4816
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://brasilapi.com.br/api/feriados/v1/{{ $now.format('yyyy') }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "00000000-0000-0000-0000-000000000010",
+      "name": "03. Buscar Feriados",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        7376,
+        4816
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Consolida feriados nacionais (BrasilAPI) + feriados fixos de contingência + feriados municipais/estaduais configurados\n// e valida se a data de execução de hoje (ou data_simulacao_iso) é um dia útil.\nconst config = $('02. Parâmetros Globais').first().json;\nconst feriadosApi = $input.all().map(i => i.json?.date).filter(Boolean);\nconst feriadosLocais = Array.isArray(config.feriados_municipais_estaduais)\n  ? config.feriados_municipais_estaduais\n  : [];\n\nconst dataSP = new Intl.DateTimeFormat('en-CA', {\n  timeZone: 'America/Sao_Paulo',\n  year: 'numeric',\n  month: '2-digit',\n  day: '2-digit'\n}).format(new Date());\nconst dataSimulada = String(config.data_simulacao_iso || '').trim().slice(0, 10);\nconst dataHojeISO = /^\\d{4}-\\d{2}-\\d{2}$/.test(dataSimulada) ? dataSimulada : dataSP;\n\nconst [yRef, mRef, dRef] = dataHojeISO.split('-').map(Number);\n// Fallback de feriados nacionais fixos (caso a BrasilAPI sofra instabilidade pontual)\nconst sufixosFeriadosFixos = ['01-01', '04-21', '05-01', '09-07', '10-12', '11-02', '11-15', '11-20', '12-25'];\nconst feriadosFixosFallback = [\n  ...sufixosFeriadosFixos.map(s => `${yRef}-${s}`),\n  ...sufixosFeriadosFixos.map(s => `${yRef + 1}-${s}`)\n];\nconst setFeriados = new Set([...feriadosApi, ...feriadosLocais, ...feriadosFixosFallback]);\n\nconst dtRef = new Date(Date.UTC(yRef, mRef - 1, dRef));\nconst diaSemana = dtRef.getUTCDay(); // 0 = Dom, 6 = Sab\nconst ehFimDeSemana = diaSemana === 0 || diaSemana === 6;\nconst ehFeriadoHoje = setFeriados.has(dataHojeISO);\nconst ehDiaUtilHoje = !ehFimDeSemana && !ehFeriadoHoje;\n\nreturn [\n  {\n    json: {\n      data_execucao_iso: dataHojeISO,\n      eh_dia_util_hoje: ehDiaUtilHoje,\n      motivo_bloqueio_dia: !ehDiaUtilHoje\n        ? (ehFeriadoHoje ? 'FERIADO' : 'FIM_DE_SEMANA')\n        : null,\n      lista_feriados: Array.from(setFeriados),\n      config\n    }\n  }\n];"
+      },
+      "id": "00000000-0000-0000-0000-000000000011",
+      "name": "04. Validar Calendário",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7600,
+        4816
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-dia-util",
+              "leftValue": "={{ $json.eh_dia_util_hoje }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-0000-0000-000000000012",
+      "name": "05. Dia Útil?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        7824,
+        4816
+      ]
+    },
+    {
+      "parameters": {
+        "query": "=WITH BASE_FILTRADA AS (\n    SELECT \n        vw.CODI_TRA,\n        vw.RAZA_TRA,\n        cl.CODI_EMP,\n        tr.TEL1_TRA,\n        tr.TEL2_TRA,\n        tr.CFO1_TRA,\n        vw.CODI_TDO,\n        TRIM(UPPER(vw.TIPO_TDO)) AS TIPO_TDO,\n        vw.CODI_TCO,\n        vw.COD1_PES,\n        TRUNC(vw.DATA_CBR) AS DATA_CBR_DT,\n        TRUNC(vw.VENC_REC) AS VENC_REC_DT,\n        TO_CHAR(TRUNC(vw.DATA_CBR), 'YYYY-MM-DD') AS DATA_CBR,\n        TO_CHAR(TRUNC(vw.VENC_REC), 'YYYY-MM-DD') AS VENC_REC,\n        vw.VLOR_REC,\n        vw.VLAB_REC,\n        ABS(NVL(vw.VLAB_REC, 0)) AS SALDO_ABERTO\n    FROM VW_ERP_CONTAS_RECEBER vw\n    LEFT JOIN ERP_PARCEIROS tr ON tr.CODI_TRA = vw.CODI_TRA\n    LEFT JOIN (\n        SELECT CODI_TRA, MAX(CODI_EMP) AS CODI_EMP\n        FROM ERP_CLIENTES_LOJA\n        GROUP BY CODI_TRA\n    ) cl ON cl.CODI_TRA = vw.CODI_TRA\n    WHERE NVL(vw.VLAB_REC, 0) != 0\n      AND TRIM(TO_CHAR(vw.CODI_TDO)) IN ('101', '102', '103')\n      AND vw.CODI_TCO NOT IN (10, 20, 30, 40)\n      AND NVL(vw.COD1_PES, 0) != 999\n      AND (TRIM(UPPER(vw.TIPO_TDO)) = 'C' OR (TRUNC(vw.VENC_REC) - TRUNC(vw.DATA_CBR)) > 15)\n),\nCLIENTES_ALVO_JANELA AS (\n    SELECT DISTINCT CODI_TRA\n    FROM BASE_FILTRADA\n    WHERE TIPO_TDO = 'D'\n      AND VENC_REC_DT BETWEEN TO_DATE('{{ $json.data_execucao_iso }}', 'YYYY-MM-DD') + 1 AND TO_DATE('{{ $json.data_execucao_iso }}', 'YYYY-MM-DD') + 18\n)\nSELECT \n    b.CODI_TRA,\n    b.RAZA_TRA,\n    b.CODI_EMP,\n    b.TEL1_TRA,\n    b.TEL2_TRA,\n    b.CFO1_TRA,\n    b.CODI_TDO,\n    b.TIPO_TDO,\n    b.CODI_TCO,\n    b.COD1_PES,\n    b.DATA_CBR,\n    b.VENC_REC,\n    b.VLOR_REC,\n    b.VLAB_REC,\n    b.SALDO_ABERTO\nFROM BASE_FILTRADA b\nINNER JOIN CLIENTES_ALVO_JANELA c ON c.CODI_TRA = b.CODI_TRA\nWHERE (b.TIPO_TDO = 'C' OR b.VENC_REC_DT >= TO_DATE('{{ $json.data_execucao_iso }}', 'YYYY-MM-DD'))\nORDER BY b.CODI_TRA, b.VENC_REC_DT ASC, b.TIPO_TDO DESC"
+      },
+      "id": "00000000-0000-0000-0000-000000000013",
+      "name": "06. Extrair Títulos",
+      "type": "n8n-nodes-oracle-database-parameterization.Oracle Database with Parameterization",
+      "typeVersion": 1,
+      "position": [
+        8112,
+        4816
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "oracleCredentials": {
+          "id": "ORACLE_ERP_CREDENTIAL_ID",
+          "name": "Oracle_ERP_Read"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-tem-titulos",
+              "leftValue": "={{ Array.isArray($json.rows) ? $json.rows.length : (($json.CODI_TRA ?? $json.codi_tra) ? 1 : 0) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-0000-0000-000000000014",
+      "name": "07. Há Títulos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        8336,
+        4816
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n    \"CHAV_COBR\",\n    \"CLIE_COBR\",\n    TO_CHAR(\"VENC_COBR\", 'YYYY-MM-DD') AS \"VENC_COBR\",\n    \"ETAP_COBR\",\n    \"STAT_COBR\",\n    TO_CHAR(\"DTNT_COBR\", 'YYYY-MM-DD') AS \"DTNT_COBR\",\n    TO_CHAR(\"DTNE_COBR\", 'YYYY-MM-DD') AS \"DTNE_COBR\",\n    \"TENT_COBR\",\n    \"UPDA_COBR\"\nFROM \"AUTOMATION\".\"AVIS_COBR\"\nWHERE \"STAT_COBR\" IN ('ENVIADO', 'ENVIADA', 'PENDENTE', 'SEM_WHATSAPP', 'NAO_ENTREGUE', 'FALHA_TELEFONE')\n  AND \"DELE_COBR\" IS NULL\n  AND \"UPDA_COBR\" >= NOW() - INTERVAL '90 days';",
+        "options": {}
+      },
+      "id": "00000000-0000-0000-0000-000000000015",
+      "name": "08. Consultar Histórico",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        9120,
+        4816
+      ],
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_MAIN_CREDENTIAL_ID",
+          "name": "PostgreSQL_Main"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// MOTOR UNIFICADO DE REGRAS DE NEGÓCIO:\n// 1. Desempacota o array `rows` retornado pelo nó Oracle (`Oracle_ERP_Read`).\n// 2. Lê o histórico de controle vindo de \"AUTOMATION\".\"AVIS_COBR\" (`PostgreSQL_Main`).\n// 3. Filtra todos os lançamentos (D e C):\n//    - VLAB_REC != 0 (VLAB_REC já é o valor em aberto do título; VLOR_REC é o valor original)\n//    - CODI_TDO IN (101, 102, 103)\n//    - CODI_TCO NOT IN (10, 20, 30, 40)\n//    - COD1_PES != 999\n//    - Prazo (VENC_REC - DATA_CBR) > 15 dias (aplicado SOMENTE aos Débitos 'D')\n// 4. Soma todos os Créditos (TIPO_TDO = 'C') em aberto da carteira do cliente.\n// 5. Agrupa os Débitos (TIPO_TDO = 'D') do cliente por Data de Vencimento (VENC_REC)\n//    em ordem cronológica crescente (FIFO).\n// 6. Abate o Crédito (C) cronologicamente:\n//    - Primeiro no vencimento mais próximo (ex: D-5) e só o crédito que sobrar\n//      abate os vencimentos seguintes (ex: D-10).\n//    - Se o Saldo Resultante do vencimento for <= 0 (Saldo Credor C), NÃO notifica.\n//    - Se o Saldo Resultante do vencimento for > 0 (Saldo Devedor D) e a data de\n//      notificação (D-10 ou D-5 antecipada para dia útil anterior) for HOJE (ou estiver\n//      em Repescagem Automática de PENDENTE / SEM_WHATSAPP / NAO_ENTREGUE),\n//      gera a mensagem única consolidada com o Saldo Resultante!\n// 7. Higienização e Seleção Inteligente de Telefone (TEL1_TRA, TEL2_TRA, CFO1_TRA):\n//    - Remove zeros antes do DDD (ex: 011 -> 11).\n//    - Prioriza: 1º Celular 9 dígitos nativo (XX 9XXXX-XXXX) -> 2º Celular 8 dígitos\n//      (convertido para 9 dígitos) -> 3º Fixo (8 dígitos iniciados em 2-5).\n//    - Desempate dentro da mesma categoria pela ordem das colunas: TEL1_TRA > TEL2_TRA > CFO1_TRA.\n//    - Retorna APENAS 1 número para envio na Z-API.\n// ============================================================================\n\nconst contextoCalendario = $('04. Validar Calendário').first().json;\nconst dataHojeISO = contextoCalendario.data_execucao_iso;\nconst setFeriados = new Set(contextoCalendario.lista_feriados || []);\nconst config = contextoCalendario.config;\nconst modoTesteForcarJanela = Boolean(config.modo_teste_forcar_janela);\n\nconst lancamentosNode = $('06. Extrair Títulos').all();\nconst lancamentosRaw = lancamentosNode.flatMap(i => Array.isArray(i.json?.rows) ? i.json.rows : [i.json]);\n\nconst historicoNode = $input.all();\nconst historicoRaw = historicoNode.flatMap(i => Array.isArray(i.json?.rows) ? i.json.rows : [i.json]);\n\nconst docsPermitidos = new Set((config.codi_tdo_permitidos || [101, 102, 103]).map(Number));\nconst cobrancasExcluidas = new Set((config.codi_tco_excluidos || [10, 20, 30, 40]).map(Number));\nconst vendedoresExcluidos = new Set((config.cod1_pes_excluidos || [999]).map(Number));\nconst prazoMinimoExclusao = Number(config.prazo_minimo_exclusao_dias ?? 15);\n\nfunction parseISODateUTC(isoStr) {\n  const clean = String(isoStr).slice(0, 10);\n  const [y, m, d] = clean.split('-').map(Number);\n  return new Date(Date.UTC(y, m - 1, d));\n}\n\nfunction formatISODateUTC(dateObj) {\n  const y = dateObj.getUTCFullYear();\n  const m = String(dateObj.getUTCMonth() + 1).padStart(2, '0');\n  const d = String(dateObj.getUTCDate()).padStart(2, '0');\n  return `${y}-${m}-${d}`;\n}\n\nfunction addDaysUTC(dateObj, days) {\n  const copy = new Date(dateObj.getTime());\n  copy.setUTCDate(copy.getUTCDate() + days);\n  return copy;\n}\n\nfunction diffDaysUTC(dateEnd, dateStart) {\n  const msPerDay = 1000 * 60 * 60 * 24;\n  return Math.round((dateEnd.getTime() - dateStart.getTime()) / msPerDay);\n}\n\n// Se cair em sábado (6), domingo (0) ou feriado, retrocede para o último dia útil anterior\nfunction ajustarParaDiaUtilAnterior(dateObj) {\n  let cursor = new Date(dateObj.getTime());\n  while (true) {\n    const iso = formatISODateUTC(cursor);\n    const dow = cursor.getUTCDay();\n    const ehFimSemana = dow === 0 || dow === 6;\n    const ehFeriado = setFeriados.has(iso);\n    if (!ehFimSemana && !ehFeriado) {\n      return iso;\n    }\n    cursor = addDaysUTC(cursor, -1);\n  }\n}\n\n// Histórico em \"AUTOMATION\".\"AVIS_COBR\" para:\n// 1) Controle de idempotência (ENVIADO / ENVIADA)\n// 2) Repescagem automática (PENDENTE / SEM_WHATSAPP / NAO_ENTREGUE / FALHA_TELEFONE)\n// 3) Detecção de prorrogação de vencimento\nconst chavesJaEnviadas = new Set();\nconst chavesParaRepescagem = new Map();\nconst ultimoVencimentoPorClienteEtapa = new Map();\nconst statusElegiveisRepescagem = new Set(['PENDENTE', 'SEM_WHATSAPP', 'NAO_ENTREGUE', 'FALHA_TELEFONE']);\n\nfor (const h of historicoRaw) {\n  if (!h) continue;\n  const statusEnv = String(h?.STAT_COBR ?? h?.stat_cobr ?? h?.status_envio ?? h?.STATUS_ENVIO ?? '').trim().toUpperCase();\n  const chaveIdemp = h?.CHAV_COBR ?? h?.chav_cobr ?? h?.chave_idempotencia ?? h?.CHAVE_IDEMPOTENCIA;\n  const codCliHist = h?.CLIE_COBR ?? h?.clie_cobr ?? h?.codi_tra ?? h?.CODI_TRA;\n  const etapaHist = h?.ETAP_COBR ?? h?.etap_cobr ?? h?.etapa_notificacao ?? h?.ETAPA_NOTIFICACAO;\n  const dataVencHist = String(h?.VENC_COBR ?? h?.venc_cobr ?? h?.venc_rec ?? h?.VENC_REC ?? '').slice(0, 10);\n\n  if (statusEnv === 'ENVIADO' || statusEnv === 'ENVIADA') {\n    if (chaveIdemp) chavesJaEnviadas.add(String(chaveIdemp));\n    if (codCliHist && etapaHist && dataVencHist) {\n      ultimoVencimentoPorClienteEtapa.set(`${codCliHist}_${etapaHist}`, dataVencHist);\n    }\n  } else if (statusElegiveisRepescagem.has(statusEnv) && chaveIdemp) {\n    chavesParaRepescagem.set(String(chaveIdemp), {\n      stat_cobr: statusEnv,\n      tent_cobr: Number(h?.TENT_COBR ?? h?.tent_cobr ?? 1),\n      dtnt_cobr: String(h?.DTNT_COBR ?? h?.dtnt_cobr ?? '').slice(0, 10),\n      dtne_cobr: String(h?.DTNE_COBR ?? h?.dtne_cobr ?? '').slice(0, 10)\n    });\n  }\n}\n\n// 1. Organizar carteira por Cliente (CODI_TRA)\nconst carteiraPorCliente = new Map();\n\nfor (const raw of lancamentosRaw) {\n  if (!raw) continue;\n\n  const codiTra = raw.CODI_TRA ?? raw.codi_tra;\n  const razaTra = String(raw.RAZA_TRA ?? raw.raza_tra ?? '').trim();\n  const codiEmp = raw.CODI_EMP ?? raw.codi_emp ?? null;\n  const tel1Tra = String(raw.TEL1_TRA ?? raw.tel1_tra ?? '').trim();\n  const tel2Tra = String(raw.TEL2_TRA ?? raw.tel2_tra ?? '').trim();\n  const cfo1Tra = String(raw.CFO1_TRA ?? raw.cfo1_tra ?? '').trim();\n  const codiTdo = Number(raw.CODI_TDO ?? raw.codi_tdo);\n  const tipoTdo = String(raw.TIPO_TDO ?? raw.tipo_tdo ?? '').trim().toUpperCase();\n  const codiTco = Number(raw.CODI_TCO ?? raw.codi_tco);\n  const cod1Pes = Number(raw.COD1_PES ?? raw.cod1_pes ?? 0);\n  const dataCbrRaw = raw.DATA_CBR ?? raw.data_cbr;\n  const vencRecRaw = raw.VENC_REC ?? raw.venc_rec;\n\n  // VLAB_REC já é o saldo em aberto do título; VLOR_REC é apenas o valor original\n  const vlabRec = Number(raw.VLAB_REC ?? raw.vlab_rec ?? raw.SALDO_ABERTO ?? raw.saldo_aberto ?? 0);\n  const saldoAberto = Math.abs(vlabRec);\n\n  if (!codiTra || !vencRecRaw || !dataCbrRaw) continue;\n\n  // Defesa em profundidade das regras de negócio\n  if (saldoAberto <= 0) continue;\n  if (!docsPermitidos.has(codiTdo)) continue;\n  if (cobrancasExcluidas.has(codiTco)) continue;\n  if (vendedoresExcluidos.has(cod1Pes)) continue;\n\n  const dtEmissao = parseISODateUTC(dataCbrRaw);\n  const dtVencimento = parseISODateUTC(vencRecRaw);\n  const prazoVendaDias = diffDaysUTC(dtVencimento, dtEmissao);\n\n  // Filtro dos 15 dias aplica-se SOMENTE aos Débitos (TIPO_TDO = 'D')\n  if (tipoTdo === 'D' && prazoVendaDias <= prazoMinimoExclusao) continue;\n\n  const chaveCli = String(codiTra);\n  if (!carteiraPorCliente.has(chaveCli)) {\n    carteiraPorCliente.set(chaveCli, {\n      codi_tra: codiTra,\n      raza_tra: razaTra,\n      codi_emp: codiEmp,\n      tel1_tra: tel1Tra,\n      tel2_tra: tel2Tra,\n      cfo1_tra: cfo1Tra,\n      total_credito_c: 0,\n      total_debito_d: 0,\n      vencimentosMap: new Map()\n    });\n  }\n\n  const cli = carteiraPorCliente.get(chaveCli);\n  if (!cli.raza_tra && razaTra) cli.raza_tra = razaTra;\n  if ((cli.codi_emp === null || cli.codi_emp === undefined || cli.codi_emp === '') && codiEmp !== null && codiEmp !== undefined) {\n    cli.codi_emp = codiEmp;\n  }\n  if (!cli.tel1_tra && tel1Tra) cli.tel1_tra = tel1Tra;\n  if (!cli.tel2_tra && tel2Tra) cli.tel2_tra = tel2Tra;\n  if (!cli.cfo1_tra && cfo1Tra) cli.cfo1_tra = cfo1Tra;\n\n  const vencISO = formatISODateUTC(dtVencimento);\n\n  if (tipoTdo === 'C') {\n    cli.total_credito_c = Number((cli.total_credito_c + saldoAberto).toFixed(2));\n  } else if (tipoTdo === 'D') {\n    cli.total_debito_d = Number((cli.total_debito_d + saldoAberto).toFixed(2));\n    if (!cli.vencimentosMap.has(vencISO)) {\n      cli.vencimentosMap.set(vencISO, {\n        venc_rec_iso: vencISO,\n        dt_vencimento: dtVencimento,\n        valor_debito_bruto: 0,\n        quantidade_titulos: 0\n      });\n    }\n    const grpVenc = cli.vencimentosMap.get(vencISO);\n    grpVenc.valor_debito_bruto = Number((grpVenc.valor_debito_bruto + saldoAberto).toFixed(2));\n    grpVenc.quantidade_titulos += 1;\n  }\n}\n\nfunction formatarMoedaBR(valor) {\n  return Number(valor).toLocaleString('pt-BR', {\n    minimumFractionDigits: 2,\n    maximumFractionDigits: 2\n  });\n}\n\nfunction formatarDataBR(isoDate) {\n  const [y, m, d] = String(isoDate).slice(0, 10).split('-');\n  return `${d}/${m}/${y}`;\n}\n\n// Avalia um trecho de telefone individual e classifica pela regra Anatel:\n// - Tier 1: Celular 9 dígitos nativo (XX 9XXXX-XXXX)\n// - Tier 2: Celular 8 dígitos sem o 9 (XX [6-9]XXX-XXXX -> padronizado com 9 após o DDD)\n// - Tier 3: Telefone Fixo 8 dígitos (XX [2-5]XXX-XXXX)\n// - Tier 99: Inválido (ex: sem DDD, dígitos insuficientes/excedentes)\nfunction analisarCandidatoTelefone(trechoBruto, ordemColuna, indiceTrecho) {\n  const original = String(trechoBruto || '').trim();\n  let digitos = original.replace(/\\D/g, '');\n  if (!digitos) return null;\n\n  // Remove zeros à esquerda (ex: 011900000000 ou (01) 19000-0000 -> 1190000000)\n  digitos = digitos.replace(/^0+/, '');\n\n  // Se já vier com DDI 55 (ex: 5511900000000, 551190000000 ou 55011900000000), isola o número nacional\n  if (digitos.startsWith('550') && digitos.length >= 13) {\n    digitos = digitos.slice(2).replace(/^0+/, '');\n  } else if (digitos.startsWith('55') && (digitos.length === 12 || digitos.length === 13)) {\n    digitos = digitos.slice(2);\n  }\n\n  // Caso ainda reste zero à esquerda após remover DDI\n  digitos = digitos.replace(/^0+/, '');\n\n  if (digitos.length < 10 || digitos.length > 11) {\n    return {\n      valido: false,\n      tier: 99,\n      ordemColuna,\n      indiceTrecho,\n      original,\n      e164: digitos,\n      motivo: 'FORMATO_TEL1_TRA_INVALIDO'\n    };\n  }\n\n  const ddd = Number(digitos.slice(0, 2));\n  const dddStr = digitos.slice(0, 2);\n  const numeroLocal = digitos.slice(2);\n\n  // DDDs válidos no Brasil vão de 11 a 99 e nunca terminam em 0\n  if (ddd < 11 || ddd > 99 || ddd % 10 === 0) {\n    return {\n      valido: false,\n      tier: 99,\n      ordemColuna,\n      indiceTrecho,\n      original,\n      e164: digitos,\n      motivo: 'FORMATO_TEL1_TRA_INVALIDO'\n    };\n  }\n\n  // Caso 1: 11 dígitos nacionais (DDD + 9 dígitos locais) -> deve iniciar com 9 (XX 9XXXX-XXXX)\n  if (numeroLocal.length === 9) {\n    if (numeroLocal[0] === '9') {\n      return {\n        valido: true,\n        tier: 1, // Prioridade 1: Celular 9 dígitos nativo (XX 9XXXX-XXXX)\n        ordemColuna,\n        indiceTrecho,\n        original,\n        e164: `55${dddStr}${numeroLocal}`,\n        motivo: null\n      };\n    }\n    return {\n      valido: false,\n      tier: 99,\n      ordemColuna,\n      indiceTrecho,\n      original,\n      e164: `55${dddStr}${numeroLocal}`,\n      motivo: 'FORMATO_TEL1_TRA_INVALIDO'\n    };\n  }\n\n  // Caso 2: 10 dígitos nacionais (DDD + 8 dígitos locais)\n  const primeiroDigitoLocal = Number(numeroLocal[0]);\n\n  // Subcaso 2A: Celular de 8 dígitos sem o 9 na frente (inicia com 6, 7, 8 ou 9)\n  if (primeiroDigitoLocal >= 6 && primeiroDigitoLocal <= 9) {\n    return {\n      valido: true,\n      tier: 2, // Prioridade 2: Celular 8 dígitos convertido para XX 9XXXX-XXXX\n      ordemColuna,\n      indiceTrecho,\n      original,\n      e164: `55${dddStr}9${numeroLocal}`,\n      motivo: null\n    };\n  }\n\n  // Subcaso 2B: Telefone fixo de 8 dígitos (inicia com 2, 3, 4 ou 5)\n  if (primeiroDigitoLocal >= 2 && primeiroDigitoLocal <= 5) {\n    return {\n      valido: true,\n      tier: 3, // Prioridade 3: Telefone Fixo (nunca adiciona 9)\n      ordemColuna,\n      indiceTrecho,\n      original,\n      e164: `55${dddStr}${numeroLocal}`,\n      motivo: null\n    };\n  }\n\n  return {\n    valido: false,\n    tier: 99,\n    ordemColuna,\n    indiceTrecho,\n    original,\n    e164: `55${dddStr}${numeroLocal}`,\n    motivo: 'FORMATO_TEL1_TRA_INVALIDO'\n  };\n}\n\n// Seleciona APENAS 1 número entre TEL1_TRA (P1), TEL2_TRA (P2) e CFO1_TRA (P3):\n// Prioridade (A): Tier 1 (Celular 9 dígitos nativo) > Tier 2 (Celular 8 dígitos) > Tier 3 (Fixo),\n// desempatando pela ordem da coluna (TEL1_TRA > TEL2_TRA > CFO1_TRA).\nfunction selecionarMelhorTelefoneBR(tel1, tel2, cfo1) {\n  const colunasBrutas = [tel1, tel2, cfo1];\n  const candidatos = [];\n\n  colunasBrutas.forEach((valorColuna, idxCol) => {\n    const textoCol = String(valorColuna || '').trim();\n    if (!textoCol) return;\n    // Caso haja mais de um número separado por '/', ';' ou '|' no mesmo campo\n    const trechos = textoCol.split(/[/;|]+/).map(t => t.trim()).filter(Boolean);\n    trechos.forEach((trecho, idxTrecho) => {\n      const analise = analisarCandidatoTelefone(trecho, idxCol + 1, idxTrecho);\n      if (analise) candidatos.push(analise);\n    });\n  });\n\n  if (candidatos.length === 0) {\n    return {\n      valido: false,\n      original: '',\n      e164: '',\n      motivo: 'TEL1_TRA_AUSENTE_NA_ERP_PARCEIROS'\n    };\n  }\n\n  const validos = candidatos\n    .filter(c => c.valido)\n    .sort((a, b) => {\n      if (a.tier !== b.tier) return a.tier - b.tier;\n      if (a.ordemColuna !== b.ordemColuna) return a.ordemColuna - b.ordemColuna;\n      return a.indiceTrecho - b.indiceTrecho;\n    });\n\n  if (validos.length > 0) {\n    const vencedor = validos[0];\n    return {\n      valido: true,\n      original: vencedor.original,\n      e164: vencedor.e164,\n      motivo: null\n    };\n  }\n\n  // Se nenhum for válido nas 3 colunas, retorna o primeiro valor preenchido que falhou\n  const primeiroInvalido = candidatos[0];\n  return {\n    valido: false,\n    original: primeiroInvalido.original,\n    e164: primeiroInvalido.e164,\n    motivo: primeiroInvalido.motivo\n  };\n}\n\n// 2. Executar Alocação Cronológica (FIFO por VENC_REC) e verificar elegibilidade D-10 / D-5 + Repescagem hoje\nconst resultadoConsolidado = [];\nconst agendaJanelaAnalisada = [];\nconst dtHojeUTC = parseISODateUTC(dataHojeISO);\n\nfor (const cli of carteiraPorCliente.values()) {\n  const saldoGlobalCliente = Number((cli.total_debito_d - cli.total_credito_c).toFixed(2));\n\n  // Regra 4: Se o saldo global do cliente já for Credor (C <= 0), não notifica nenhum vencimento\n  if (saldoGlobalCliente <= 0) continue;\n\n  // Ordenar os vencimentos de Débito (D) do mais próximo para o mais distante (FIFO)\n  const vencimentosOrdenados = Array.from(cli.vencimentosMap.values()).sort((a, b) =>\n    a.venc_rec_iso.localeCompare(b.venc_rec_iso)\n  );\n\n  let creditoDisponivelFIFO = cli.total_credito_c;\n\n  for (const v of vencimentosOrdenados) {\n    // Abate o crédito disponível neste vencimento (FIFO)\n    const creditoAbatidoNesteVencimento = Number(\n      Math.min(creditoDisponivelFIFO, v.valor_debito_bruto).toFixed(2)\n    );\n    const saldoResultanteVencimento = Number(\n      (v.valor_debito_bruto - creditoAbatidoNesteVencimento).toFixed(2)\n    );\n    creditoDisponivelFIFO = Number(\n      (creditoDisponivelFIFO - creditoAbatidoNesteVencimento).toFixed(2)\n    );\n\n    // Se o crédito cobriu 100% deste vencimento (Saldo Credor/Zero no vencimento), não notifica\n    if (saldoResultanteVencimento <= 0) continue;\n\n    // Verifica se este vencimento tem notificação D-10 ou D-5 prevista para HOJE (ou Repescagem Automática)\n    const dataTeoricaD10 = addDaysUTC(v.dt_vencimento, -10);\n    const dataUtilD10 = ajustarParaDiaUtilAnterior(dataTeoricaD10);\n\n    const dataTeoricaD5 = addDaysUTC(v.dt_vencimento, -5);\n    const dataUtilD5 = ajustarParaDiaUtilAnterior(dataTeoricaD5);\n\n    const diasAteVencimento = diffDaysUTC(v.dt_vencimento, dtHojeUTC);\n\n    const chaveD10 = `${cli.codi_tra}_${v.venc_rec_iso}_D-10`;\n    const chaveD5 = `${cli.codi_tra}_${v.venc_rec_iso}_D-5`;\n\n    agendaJanelaAnalisada.push({\n      codi_tra: cli.codi_tra,\n      raza_tra: cli.raza_tra,\n      codi_emp: cli.codi_emp,\n      venc_rec_iso: v.venc_rec_iso,\n      dias_ate_vencimento: diasAteVencimento,\n      valor_bruto_vencimento: v.valor_debito_bruto,\n      credito_abatido_fifo: creditoAbatidoNesteVencimento,\n      saldo_devedor_resultante: saldoResultanteVencimento,\n      disparo_d10_teorico: formatISODateUTC(dataTeoricaD10),\n      disparo_d10_dia_util: dataUtilD10,\n      disparo_d5_teorico: formatISODateUTC(dataTeoricaD5),\n      disparo_d5_dia_util: dataUtilD5,\n      repescagem_d10_pendente: chavesParaRepescagem.has(chaveD10),\n      repescagem_d5_pendente: chavesParaRepescagem.has(chaveD5),\n      data_execucao_avaliada: dataHojeISO\n    });\n\n    let etapaHoje = null;\n    let dataNotificacaoTeorica = null;\n    let houveAntecipacaoDiaUtil = false;\n    let ehRepescagem = false;\n    let infoRepescagem = null;\n\n    if (dataUtilD10 === dataHojeISO) {\n      etapaHoje = 'D-10';\n      dataNotificacaoTeorica = formatISODateUTC(dataTeoricaD10);\n      houveAntecipacaoDiaUtil = dataUtilD10 !== dataNotificacaoTeorica;\n      if (chavesParaRepescagem.has(chaveD10)) {\n        ehRepescagem = true;\n        infoRepescagem = chavesParaRepescagem.get(chaveD10);\n      }\n    } else if (dataUtilD5 === dataHojeISO) {\n      etapaHoje = 'D-5';\n      dataNotificacaoTeorica = formatISODateUTC(dataTeoricaD5);\n      houveAntecipacaoDiaUtil = dataUtilD5 !== dataNotificacaoTeorica;\n      if (chavesParaRepescagem.has(chaveD5)) {\n        ehRepescagem = true;\n        infoRepescagem = chavesParaRepescagem.get(chaveD5);\n      }\n    } else if (\n      dataHojeISO > dataUtilD5 &&\n      dataHojeISO < v.venc_rec_iso &&\n      !chavesJaEnviadas.has(chaveD5) &&\n      chavesParaRepescagem.has(chaveD5)\n    ) {\n      // Repescagem automática do D-5 (dias úteis entre D-5 e a véspera do vencimento D-1)\n      etapaHoje = 'D-5';\n      infoRepescagem = chavesParaRepescagem.get(chaveD5);\n      dataNotificacaoTeorica = infoRepescagem?.dtnt_cobr || formatISODateUTC(dataTeoricaD5);\n      houveAntecipacaoDiaUtil = dataUtilD5 !== formatISODateUTC(dataTeoricaD5);\n      ehRepescagem = true;\n    } else if (\n      dataHojeISO > dataUtilD10 &&\n      dataHojeISO < dataUtilD5 &&\n      !chavesJaEnviadas.has(chaveD10) &&\n      chavesParaRepescagem.has(chaveD10)\n    ) {\n      // Repescagem automática do D-10 (dias úteis entre D-10 e a véspera da janela do D-5)\n      etapaHoje = 'D-10';\n      infoRepescagem = chavesParaRepescagem.get(chaveD10);\n      dataNotificacaoTeorica = infoRepescagem?.dtnt_cobr || formatISODateUTC(dataTeoricaD10);\n      houveAntecipacaoDiaUtil = dataUtilD10 !== formatISODateUTC(dataTeoricaD10);\n      ehRepescagem = true;\n    } else if (modoTesteForcarJanela) {\n      etapaHoje = diasAteVencimento <= 7 ? 'D-5' : 'D-10';\n      dataNotificacaoTeorica = etapaHoje === 'D-5' ? formatISODateUTC(dataTeoricaD5) : formatISODateUTC(dataTeoricaD10);\n      houveAntecipacaoDiaUtil = false;\n    }\n\n    if (!etapaHoje) continue;\n\n    const chaveGrupo = `${cli.codi_tra}_${v.venc_rec_iso}_${etapaHoje}`;\n\n    // Regra 6: Evitar notificações duplicadas para o mesmo cliente, vencimento e etapa já ENVIADOS\n    if (chavesJaEnviadas.has(chaveGrupo)) continue;\n\n    const vencAnterior = ultimoVencimentoPorClienteEtapa.get(`${cli.codi_tra}_${etapaHoje}`) || null;\n    // Só caracteriza prorrogação real se o vencimento anterior (futuro) deixou de existir em aberto e foi postergado\n    const houveProrrogacao = Boolean(\n      vencAnterior &&\n      vencAnterior >= dataHojeISO &&\n      !cli.vencimentosMap.has(vencAnterior) &&\n      v.venc_rec_iso > vencAnterior\n    );\n\n    const valorFormatado = formatarMoedaBR(saldoResultanteVencimento);\n    const dataVencimentoBR = formatarDataBR(v.venc_rec_iso);\n    const validacaoFone = selecionarMelhorTelefoneBR(cli.tel1_tra, cli.tel2_tra, cli.cfo1_tra);\n    const numeroTentativa = ehRepescagem ? (Number(infoRepescagem?.tent_cobr || 1) + 1) : 1;\n\n    // Regra 5: Mensagem Padrão informando o Saldo Devedor Resultante do vencimento\n    const mensagemPadrao = [\n      `Olá, ${cli.raza_tra}, tudo bem?`,\n      `Passando para lembrar que temos um pagamento no valor de R$ ${valorFormatado}, com vencimento em ${dataVencimentoBR}.`,\n      `Gostaria de confirmar se está tudo certo para o pagamento na data prevista.`,\n      `Caso precise do boleto ou de alguma informação para realizar o pagamento, por favor, entre em contato com ${config.telefone_contato_financeiro || '(00) 90000-0000'} que providenciaremos o encaminhamento.`,\n      `Após a quitação, pedimos, se possível, o envio do comprovante para realizarmos a baixa.`,\n      `Obrigada!`\n    ].join('\\n\\n');\n\n    resultadoConsolidado.push({\n      json: {\n        chave_idempotencia: chaveGrupo,\n        possui_notificacoes_hoje: true,\n        codi_tra: cli.codi_tra,\n        raza_tra: cli.raza_tra,\n        codi_emp: cli.codi_emp,\n        tel1_tra_original: validacaoFone.original,\n        venc_rec_iso: v.venc_rec_iso,\n        venc_rec_br: dataVencimentoBR,\n        etapa_notificacao: etapaHoje,\n        data_notificacao_teorica: dataNotificacaoTeorica,\n        data_notificacao_efetiva: dataHojeISO,\n        antecipado_dia_util: houveAntecipacaoDiaUtil,\n        repescagem_automatica: ehRepescagem,\n        tentativa_numero: numeroTentativa,\n        status_anterior_repescagem: ehRepescagem ? (infoRepescagem?.stat_cobr || null) : null,\n        recalculado_por_prorrogacao: houveProrrogacao,\n        vencimento_anterior_iso: houveProrrogacao ? vencAnterior : null,\n        quantidade_titulos: v.quantidade_titulos,\n        valor_bruto_vencimento: v.valor_debito_bruto,\n        credito_abatido_vencimento: creditoAbatidoNesteVencimento,\n        valor_consolidado: saldoResultanteVencimento,\n        valor_consolidado_br: valorFormatado,\n        saldo_debito_d: cli.total_debito_d,\n        saldo_credito_c: cli.total_credito_c,\n        saldo_compensado_cliente: saldoGlobalCliente,\n        natureza_saldo: 'D',\n        telefone_e164: validacaoFone.e164,\n        cadastro_telefone_valido: validacaoFone.valido,\n        motivo_invalidez_cadastro: validacaoFone.motivo,\n        mensagem_texto: mensagemPadrao\n      }\n    });\n  }\n}\n\nif (resultadoConsolidado.length === 0) {\n  return [\n    {\n      json: {\n        chave_idempotencia: '',\n        possui_notificacoes_hoje: false,\n        data_execucao_iso: dataHojeISO,\n        total_lancamentos_oracle_janela: lancamentosRaw.length,\n        total_clientes_avaliados: carteiraPorCliente.size,\n        motivo_sem_disparo_hoje: `Existem ${agendaJanelaAnalisada.length} vencimento(s) com saldo devedor na janela de 1 a 18 dias, porém nenhum possui etapa D-10, D-5 ou Repescagem Automática prevista para a data de referência (${dataHojeISO}). Consulte 'agenda_proximos_disparos' para ver a data exata do D-10 e D-5 de cada cliente (ou ajuste 'data_simulacao_iso' / 'modo_teste_forcar_janela' no nó [02. Parâmetros Globais] para testar o envio).`,\n        agenda_proximos_disparos: agendaJanelaAnalisada\n      }\n    }\n  ];\n}\n\nreturn resultadoConsolidado;"
+      },
+      "id": "00000000-0000-0000-0000-000000000016",
+      "name": "09. Motor FIFO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        9344,
+        4816
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-tem-consolidados",
+              "leftValue": "={{ $json.chave_idempotencia }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-0000-0000-000000000017",
+      "name": "12. Há Envios?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        9568,
+        4816
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "00000000-0000-0000-0000-000000000018",
+      "name": "13. Lote Individual",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        10176,
+        4720
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-fone-valido",
+              "leftValue": "={{ $json.cadastro_telefone_valido }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-0000-0000-000000000019",
+      "name": "14. Telefone Válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        10400,
+        4992
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.z-api.io/instances/{{ $('02. Parâmetros Globais').first().json.zapi_instance_id }}/token/{{ $('02. Parâmetros Globais').first().json.zapi_token }}/phone-exists/{{ $json.telefone_e164 }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Client-Token",
+              "value": "={{ $('02. Parâmetros Globais').first().json.zapi_client_token }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "00000000-0000-0000-0000-000000000020",
+      "name": "14b. Verificar WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        10624,
+        4880
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-phone-exists-wpp",
+              "leftValue": "={{ Boolean($json.exists) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-0000-0000-000000000021",
+      "name": "14c. Possui WhatsApp?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        10848,
+        4880
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.z-api.io/instances/{{ $('02. Parâmetros Globais').first().json.zapi_instance_id }}/token/{{ $('02. Parâmetros Globais').first().json.zapi_token }}/send-text",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Client-Token",
+              "value": "={{ $('02. Parâmetros Globais').first().json.zapi_client_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"phone\": \"{{ $json.phone || $('13. Lote Individual').first().json.telefone_e164 }}\",\n  \"message\": {{ JSON.stringify($('13. Lote Individual').first().json.mensagem_texto) }},\n  \"delayMessage\": {{ Math.floor(Math.random() * 4) + 2 }},\n  \"delayTyping\": {{ Math.floor(Math.random() * 5) + 4 }}\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "00000000-0000-0000-0000-000000000022",
+      "name": "15. Enviar WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        11072,
+        4800
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Classifica o resultado da validação e do disparo Z-API em:\n// - ENVIADO (possui WhatsApp confirmado no /phone-exists e envio aceito no /send-text com zaapId/messageId)\n// - SEM_WHATSAPP (formato de telefone válido, porém /phone-exists retornou exists: false — ex: fixo sem WhatsApp)\n// - NAO_ENTREGUE (erro técnico da Z-API, falha de conexão ou rejeição no envio)\n// - PENDENTE (TEL1_TRA com formato inválido ou ausente na tabela ERP_PARCEIROS)\n\nconst dadosCliente = $('13. Lote Individual').first().json;\nconst payloadEntrada = $input.first()?.json || {};\nconst sufixoRepescagem = dadosCliente.repescagem_automatica\n  ? ` [Repescagem automática - ${dadosCliente.tentativa_numero || 2}ª tentativa | Status anterior: ${dadosCliente.status_anterior_repescagem || 'PENDENTE'}]`\n  : '';\n\nlet statusEnvio = 'ENVIADO';\nlet codigoErro = null;\nlet detalheStatus = `Mensagem enviada com sucesso via Z-API (WhatsApp validado previamente via phone-exists).${sufixoRepescagem}`;\nlet telefoneE164Final = dadosCliente.telefone_e164;\nlet respostaBrutaAuditoria = payloadEntrada;\n\nif (!dadosCliente.cadastro_telefone_valido) {\n  // 1. Formato inválido ou ausente na ERP_PARCEIROS (nem consultou Z-API)\n  statusEnvio = 'PENDENTE';\n  codigoErro = dadosCliente.motivo_invalidez_cadastro || 'TEL1_TRA_INVALIDO';\n  detalheStatus = `Envio pendente por inconsistência cadastral na ERP_PARCEIROS.TEL1_TRA: ${codigoErro} (Valor atual: \"${dadosCliente.tel1_tra_original || 'VAZIO'}\").${sufixoRepescagem}`;\n  respostaBrutaAuditoria = { envio_ignorado: true, motivo: codigoErro, repescagem_automatica: Boolean(dadosCliente.repescagem_automatica) };\n} else if (\n  !payloadEntrada.error &&\n  !(payloadEntrada.statusCode >= 400) &&\n  Object.prototype.hasOwnProperty.call(payloadEntrada, 'exists') &&\n  payloadEntrada.exists !== true\n) {\n  // 2. Veio da saída 'false' do [14c. Possui WhatsApp?] com retorno explícito exists: false (sem erro de conexão/API)\n  statusEnvio = 'SEM_WHATSAPP';\n  codigoErro = 'NUMERO_SEM_WHATSAPP';\n  detalheStatus = `O telefone cadastrado na ERP_PARCEIROS (\"${dadosCliente.tel1_tra_original || ''}\" -> ${dadosCliente.telefone_e164}) não possui conta ativa no WhatsApp (telefone fixo ou número sem WhatsApp). Necessário atualizar o telefone na tabela ERP_PARCEIROS.${sufixoRepescagem}`;\n} else {\n  // 3. Caso tenha passado pelo [14b. Verificar WhatsApp] (ou falhado tecnicamente nele/no [15. Enviar WhatsApp])\n  const checkWpp = $('14b. Verificar WhatsApp').first()?.json || {};\n  if (checkWpp.phone && typeof checkWpp.phone === 'string') {\n    telefoneE164Final = checkWpp.phone;\n  }\n\n  if (\n    payloadEntrada.error ||\n    payloadEntrada.statusCode >= 400 ||\n    payloadEntrada.value === false ||\n    (!payloadEntrada.zaapId && !payloadEntrada.messageId && !payloadEntrada.id)\n  ) {\n    statusEnvio = 'NAO_ENTREGUE';\n    codigoErro = String(payloadEntrada.code || payloadEntrada.statusCode || 'FALHA_ENTREGA_ZAPI');\n    detalheStatus = `${String(\n      payloadEntrada.message ||\n      payloadEntrada.error?.message ||\n      payloadEntrada.error ||\n      'Falha técnica ao consultar/enviar mensagem na Z-API. Verificar conexão da instância.'\n    )}${sufixoRepescagem}`;\n  }\n}\n\nreturn [\n  {\n    json: {\n      ...dadosCliente,\n      telefone_e164: telefoneE164Final,\n      status_envio: statusEnvio,\n      codigo_erro: codigoErro,\n      detalhe_status: detalheStatus,\n      zapi_message_id: statusEnvio === 'ENVIADO' ? (payloadEntrada.messageId || payloadEntrada.zaapId || payloadEntrada.id || null) : null,\n      zapi_raw_response: respostaBrutaAuditoria,\n      data_hora_processamento: new Date().toISOString()\n    }\n  }\n];"
+      },
+      "id": "00000000-0000-0000-0000-000000000023",
+      "name": "16. Classificar Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11296,
+        4992
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH upsert_cobr AS (\n    INSERT INTO \"AUTOMATION\".\"AVIS_COBR\" (\n        \"CHAV_COBR\",\n        \"CLIE_COBR\",\n        \"RAZA_COBR\",\n        \"TELO_COBR\",\n        \"TELE_COBR\",\n        \"VENC_COBR\",\n        \"ETAP_COBR\",\n        \"DTNT_COBR\",\n        \"DTNE_COBR\",\n        \"ANTE_COBR\",\n        \"PROR_COBR\",\n        \"VEAN_COBR\",\n        \"QTIT_COBR\",\n        \"VLBR_COBR\",\n        \"CRAB_COBR\",\n        \"VLCO_COBR\",\n        \"SLDD_COBR\",\n        \"SLDC_COBR\",\n        \"SLDG_COBR\",\n        \"STAT_COBR\",\n        \"TENT_COBR\",\n        \"ERRO_COBR\",\n        \"DETA_COBR\",\n        \"ZAPI_COBR\",\n        \"MENS_COBR\",\n        \"CREA_COBR\",\n        \"UPDA_COBR\",\n        \"USCR_COBR\",\n        \"USAL_COBR\"\n    ) VALUES (\n        '{{ $json.chave_idempotencia }}',\n        {{ Number($json.codi_tra) }},\n        '{{ String($json.raza_tra).replace(/'/g, \"''\") }}',\n        '{{ String($json.tel1_tra_original || '').replace(/'/g, \"''\") }}',\n        '{{ String($json.telefone_e164 || '') }}',\n        '{{ $json.venc_rec_iso }}'::date,\n        '{{ $json.etapa_notificacao }}',\n        '{{ $json.data_notificacao_teorica }}'::date,\n        '{{ $json.data_notificacao_efetiva }}'::date,\n        {{ $json.antecipado_dia_util ? 'TRUE' : 'FALSE' }},\n        {{ $json.recalculado_por_prorrogacao ? 'TRUE' : 'FALSE' }},\n        {{ $json.vencimento_anterior_iso ? \"'\" + $json.vencimento_anterior_iso + \"'::date\" : \"NULL\" }},\n        {{ Number($json.quantidade_titulos) }},\n        {{ Number($json.valor_bruto_vencimento) }},\n        {{ Number($json.credito_abatido_vencimento) }},\n        {{ Number($json.valor_consolidado) }},\n        {{ Number($json.saldo_debito_d) }},\n        {{ Number($json.saldo_credito_c) }},\n        {{ Number($json.saldo_compensado_cliente) }},\n        '{{ $json.status_envio }}',\n        1,\n        {{ $json.codigo_erro ? \"'\" + String($json.codigo_erro).replace(/'/g, \"''\") + \"'\" : \"NULL\" }},\n        '{{ String($json.detalhe_status || '').replace(/'/g, \"''\") }}',\n        {{ $json.zapi_message_id ? \"'\" + String($json.zapi_message_id).replace(/'/g, \"''\") + \"'\" : \"NULL\" }},\n        '{{ String($json.mensagem_texto || '').replace(/'/g, \"''\") }}',\n        NOW(),\n        NOW(),\n        'svc_n8n_init',\n        'svc_n8n_automation'\n    )\n    ON CONFLICT (\"CHAV_COBR\") DO UPDATE SET\n        \"TELO_COBR\" = EXCLUDED.\"TELO_COBR\",\n        \"TELE_COBR\" = EXCLUDED.\"TELE_COBR\",\n        \"DTNT_COBR\" = EXCLUDED.\"DTNT_COBR\",\n        \"DTNE_COBR\" = EXCLUDED.\"DTNE_COBR\",\n        \"ANTE_COBR\" = EXCLUDED.\"ANTE_COBR\",\n        \"PROR_COBR\" = EXCLUDED.\"PROR_COBR\",\n        \"VEAN_COBR\" = EXCLUDED.\"VEAN_COBR\",\n        \"QTIT_COBR\" = EXCLUDED.\"QTIT_COBR\",\n        \"VLBR_COBR\" = EXCLUDED.\"VLBR_COBR\",\n        \"CRAB_COBR\" = EXCLUDED.\"CRAB_COBR\",\n        \"VLCO_COBR\" = EXCLUDED.\"VLCO_COBR\",\n        \"SLDD_COBR\" = EXCLUDED.\"SLDD_COBR\",\n        \"SLDC_COBR\" = EXCLUDED.\"SLDC_COBR\",\n        \"SLDG_COBR\" = EXCLUDED.\"SLDG_COBR\",\n        \"STAT_COBR\" = EXCLUDED.\"STAT_COBR\",\n        \"TENT_COBR\" = \"AUTOMATION\".\"AVIS_COBR\".\"TENT_COBR\" + 1,\n        \"ERRO_COBR\" = EXCLUDED.\"ERRO_COBR\",\n        \"DETA_COBR\" = EXCLUDED.\"DETA_COBR\",\n        \"ZAPI_COBR\" = COALESCE(EXCLUDED.\"ZAPI_COBR\", \"AUTOMATION\".\"AVIS_COBR\".\"ZAPI_COBR\"),\n        \"MENS_COBR\" = EXCLUDED.\"MENS_COBR\",\n        \"UPDA_COBR\" = NOW(),\n        \"USAL_COBR\" = 'svc_n8n_automation'\n    RETURNING \"IDEN_COBR\"\n)\nINSERT INTO \"AUTOMATION\".\"COBR_HIST\" (\n    \"IDEN_COBR\",\n    \"CHAV_HIST\",\n    \"EXEC_HIST\",\n    \"CLIE_HIST\",\n    \"VENC_HIST\",\n    \"ETAP_HIST\",\n    \"VLCO_HIST\",\n    \"STAT_HIST\",\n    \"ERRO_HIST\",\n    \"DETA_HIST\",\n    \"ZAPI_HIST\",\n    \"PAYL_HIST\",\n    \"CREA_HIST\",\n    \"UPDA_HIST\",\n    \"USCR_HIST\",\n    \"USAL_HIST\"\n)\nSELECT\n    u.\"IDEN_COBR\",\n    '{{ $json.chave_idempotencia }}',\n    '{{ $execution.id }}',\n    {{ Number($json.codi_tra) }},\n    '{{ $json.venc_rec_iso }}'::date,\n    '{{ $json.etapa_notificacao }}',\n    {{ Number($json.valor_consolidado) }},\n    '{{ $json.status_envio }}',\n    {{ $json.codigo_erro ? \"'\" + String($json.codigo_erro).replace(/'/g, \"''\") + \"'\" : \"NULL\" }},\n    '{{ String($json.detalhe_status || '').replace(/'/g, \"''\") }}',\n    {{ $json.zapi_message_id ? \"'\" + String($json.zapi_message_id).replace(/'/g, \"''\") + \"'\" : \"NULL\" }},\n    '{{ JSON.stringify($json.zapi_raw_response || {}).replace(/'/g, \"''\") }}'::jsonb,\n    NOW(),\n    NOW(),\n    'svc_n8n_init',\n    'svc_n8n_automation'\nFROM upsert_cobr u;",
+        "options": {}
+      },
+      "id": "00000000-0000-0000-0000-000000000024",
+      "name": "17. Registrar Auditoria",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        11520,
+        4992
+      ],
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_MAIN_CREDENTIAL_ID",
+          "name": "PostgreSQL_Main"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Restaura o payload completo do item processado na iteração atual\n// para que o SplitInBatches acumule todos os objetos na saída 'done' (Output 0).\nreturn $('16. Classificar Status').all();"
+      },
+      "id": "00000000-0000-0000-0000-000000000025",
+      "name": "17b. Preservar Contexto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11744,
+        4992
+      ]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.status_envio === 'PENDENTE' ? 1 : ($json.status_envio === 'SEM_WHATSAPP' ? 2 : (Math.floor(Math.random() * ((Number($('02. Parâmetros Globais').first().json.delay_max_segundos || 35) - Number($('02. Parâmetros Globais').first().json.delay_min_segundos || 15)) + 1)) + Number($('02. Parâmetros Globais').first().json.delay_min_segundos || 15))) }}"
+      },
+      "id": "00000000-0000-0000-0000-000000000026",
+      "name": "18. Espera Anti-Ban",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        11968,
+        4992
+      ],
+      "webhookId": "00000000-0000-0000-0001-000000000026"
+    },
+    {
+      "parameters": {
+        "toRecipients": "={{ $('19. Consolidar Relatório').first().json.destinatarios_email_csv }}",
+        "subject": "={{ $('19. Consolidar Relatório').first().json.assunto_email }}",
+        "bodyContent": "={{ $('19. Consolidar Relatório').first().json.html_relatorio }}",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "data"
+              }
+            ]
+          },
+          "bccRecipients": "={{ $('19. Consolidar Relatório').first().json.copias_email_csv }}",
+          "bodyContentType": "html"
+        }
+      },
+      "id": "00000000-0000-0000-0000-000000000027",
+      "name": "20. Enviar Relatório",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        13088,
+        4704
+      ],
+      "webhookId": "00000000-0000-0000-0001-000000000027",
+      "executeOnce": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notesInFlow": false,
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "OUTLOOK_OAUTH_CREDENTIAL_ID",
+          "name": "Microsoft_Outlook_Corporate"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// REGRA 6: RELATÓRIO E CONTROLE (E-MAIL PADRONIZADO CORPORATIVO + PLANILHA EXCEL)\n// 1. Agrupa, classifica e ordena todos os registros processados na execução.\n// 2. Calcula os indicadores do resumo (Enviadas, Sem WhatsApp, Formato Inválido/Vazio, Não Entregues).\n// 3. Monta o HTML institucional Empresa Exemplo e prepara as linhas padronizadas\n//    para geração do arquivo Excel (.xlsx) anexo.\n// ============================================================================\n\nconst todosProcessados = $input.all().map(i => i.json).filter(x => x && x.chave_idempotencia);\nconst config = $('02. Parâmetros Globais').first().json;\nconst dataExecucao = $('04. Validar Calendário').first().json.data_execucao_iso;\n\nfunction formatarDataBR(isoStr) {\n  const clean = String(isoStr || '').slice(0, 10);\n  const partes = clean.split('-');\n  if (partes.length !== 3) return clean;\n  return `${partes[2]}/${partes[1]}/${partes[0]}`;\n}\n\nfunction normalizarListaEmail(valorBruto) {\n  if (Array.isArray(valorBruto)) return valorBruto;\n  if (typeof valorBruto === 'string' && valorBruto.trim()) {\n    try {\n      const parsed = JSON.parse(valorBruto);\n      return Array.isArray(parsed) ? parsed : [];\n    } catch {\n      return [];\n    }\n  }\n  return [];\n}\n\nconst dataExecucaoBR = formatarDataBR(dataExecucao);\nconst anoExecucao = String(dataExecucao || '').slice(0, 4) || String(new Date().getFullYear());\n\nconst listaDestinatarios = normalizarListaEmail(config.destinatarios_relatorio_email);\nconst destinatariosNomes = listaDestinatarios\n  .map(d => d?.nome)\n  .filter(Boolean);\nconst destinatariosEmails = listaDestinatarios\n  .map(d => d?.email)\n  .filter(Boolean)\n  .join(', ');\n\nconst listaCopias = normalizarListaEmail(config.copias_relatorio_email);\nconst copiasNomes = listaCopias\n  .map(d => d?.nome)\n  .filter(Boolean);\nconst copiasEmails = listaCopias\n  .map(d => d?.email)\n  .filter(Boolean)\n  .join(', ');\n\nconst enviadas = todosProcessados.filter(x => x.status_envio === 'ENVIADO' || x.status_envio === 'ENVIADA');\nconst semWhatsapp = todosProcessados.filter(x => x.status_envio === 'SEM_WHATSAPP');\nconst pendentes = todosProcessados.filter(x => x.status_envio === 'PENDENTE');\nconst naoEntregues = todosProcessados.filter(x => x.status_envio === 'NAO_ENTREGUE');\nconst falhasEPendencias = [...semWhatsapp, ...pendentes, ...naoEntregues];\n\n// Ordena todos os registros para a planilha Excel:\n// 1º SEM_WHATSAPP -> 2º PENDENTE -> 3º NAO_ENTREGUE -> 4º ENVIADO\nconst pesoStatus = {\n  SEM_WHATSAPP: 1,\n  PENDENTE: 2,\n  NAO_ENTREGUE: 3,\n  ENVIADO: 4,\n  ENVIADA: 4\n};\n\nconst registrosOrdenados = [...todosProcessados].sort((a, b) => {\n  const pA = pesoStatus[a.status_envio] ?? 9;\n  const pB = pesoStatus[b.status_envio] ?? 9;\n  if (pA !== pB) return pA - pB;\n  const cmpVenc = String(a.venc_rec_iso || '').localeCompare(String(b.venc_rec_iso || ''));\n  if (cmpVenc !== 0) return cmpVenc;\n  return String(a.raza_tra || '').localeCompare(String(b.raza_tra || ''));\n});\n\nconst linhasExcelPadronizadas = registrosOrdenados.map(item => ({\n  \"Loja (CODI_EMP)\": item.codi_emp !== null && item.codi_emp !== undefined && item.codi_emp !== '' ? Number(item.codi_emp) : '-',\n  \"CODI_TRA\": Number(item.codi_tra),\n  \"Cliente (RAZA_TRA)\": item.raza_tra || '',\n  \"Status\": item.status_envio || '',\n  \"Repescagem Automática?\": item.repescagem_automatica ? `Sim (${item.tentativa_numero || 2}ª tentativa | Antes: ${item.status_anterior_repescagem || 'PENDENTE'})` : 'Não',\n  \"Tentativa Nº\": Number(item.tentativa_numero || 1),\n  \"Telefone Cadastrado (ERP_PARCEIROS)\": item.tel1_tra_original || 'VAZIO',\n  \"Telefone Padronizado (WhatsApp)\": item.telefone_e164 || '-',\n  \"Etapa\": item.etapa_notificacao || '',\n  \"Vencimento (VENC_REC)\": item.venc_rec_br || formatarDataBR(item.venc_rec_iso),\n  \"Qtd. Títulos\": Number(item.quantidade_titulos || 1),\n  \"Valor Bruto Vencimento (R$)\": Number(item.valor_bruto_vencimento || 0),\n  \"Crédito Abatido FIFO (R$)\": Number(item.credito_abatido_vencimento || 0),\n  \"Saldo Devedor Resultante (R$)\": Number(item.valor_consolidado || 0),\n  \"Saldo Devedor Formatado\": `R$ ${item.valor_consolidado_br || '0,00'}`,\n  \"Data Prevista Notificação\": formatarDataBR(item.data_notificacao_teorica),\n  \"Data Efetiva Execução\": formatarDataBR(item.data_notificacao_teorica ? item.data_notificacao_efetiva : dataExecucao),\n  \"Antecipado Dia Útil?\": item.antecipado_dia_util ? 'Sim' : 'Não',\n  \"Prorrogação Detectada?\": item.recalculado_por_prorrogacao ? 'Sim' : 'Não',\n  \"Motivo / Diagnóstico\": item.detalhe_status || '',\n  \"Código de Erro\": item.codigo_erro || '-',\n  \"ID Mensagem Z-API\": item.zapi_message_id || '-'\n}));\n\nconst htmlRelatorio = `<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\"\n\"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">\n\n<html xmlns=\"http://www.w3.org/1999/xhtml\"\n      xmlns:v=\"urn:schemas-microsoft-com:vml\"\n      xmlns:o=\"urn:schemas-microsoft-com:office:office\"\n      lang=\"pt-BR\">\n\n<head>\n\n<meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\" />\n\n<meta\n    name=\"viewport\"\n    content=\"width=device-width, initial-scale=1.0\"\n/>\n\n<meta name=\"color-scheme\" content=\"light\" />\n\n<meta\n    name=\"supported-color-schemes\"\n    content=\"light\"\n/>\n\n<title>Relatório de Cobrança Preventiva | Empresa Exemplo</title>\n\n<style type=\"text/css\">\n\n#outlook a {\n    padding:0;\n}\n\nbody {\n    width:100% !important;\n    margin:0 !important;\n    padding:0 !important;\n    background-color:#f4f4f5;\n    -webkit-text-size-adjust:100%;\n    -ms-text-size-adjust:100%;\n}\n\ntable {\n    border-collapse:collapse !important;\n    border-spacing:0 !important;\n    mso-table-lspace:0pt;\n    mso-table-rspace:0pt;\n}\n\ntd {\n    border-collapse:collapse !important;\n}\n\nimg {\n    display:block;\n    border:0;\n    outline:none;\n    text-decoration:none;\n    -ms-interpolation-mode:bicubic;\n}\n\na {\n    text-decoration:none;\n}\n\np,\nh1 {\n    margin:0;\n    padding:0;\n}\n\n.ExternalClass {\n    width:100%;\n}\n\n.ExternalClass,\n.ExternalClass p,\n.ExternalClass span,\n.ExternalClass font,\n.ExternalClass td,\n.ExternalClass div {\n    line-height:100%;\n}\n\n.footer-link,\n.footer-link:link,\n.footer-link:visited,\n.footer-link:hover,\n.footer-link:active {\n    color:#7d8982 !important;\n    -webkit-text-fill-color:#7d8982 !important;\n    text-decoration-color:#7d8982 !important;\n}\n\n[data-ogsc] .footer-link {\n    color:#7d8982 !important;\n    -webkit-text-fill-color:#7d8982 !important;\n}\n\n@media only screen and (max-width:620px) {\n\n    .outer-pad {\n        padding:0 !important;\n    }\n\n    .email-container {\n        width:100% !important;\n        max-width:600px !important;\n        border-radius:0 !important;\n    }\n\n    .header-cell {\n        padding:26px 15px !important;\n    }\n\n    .main-logo {\n        width:170px !important;\n        max-width:60% !important;\n        height:auto !important;\n    }\n\n    .hero-image {\n        width:100% !important;\n        height:auto !important;\n    }\n\n    .content-pad {\n        padding-left:24px !important;\n        padding-right:24px !important;\n    }\n\n    .metric-cell {\n        display:block !important;\n        width:100% !important;\n        padding:0 0 10px 0 !important;\n    }\n\n    .metric-table {\n        width:100% !important;\n    }\n\n}\n\n@media only screen and (max-width:460px) {\n\n    .main-title {\n        font-size:23px !important;\n        line-height:29px !important;\n    }\n\n    .subtitle {\n        font-size:13px !important;\n    }\n\n    .body-text {\n        font-size:15px !important;\n        line-height:22px !important;\n    }\n\n    .footer-link {\n        font-size:10px !important;\n        line-height:15px !important;\n    }\n\n    .footer-note {\n        font-size:10px !important;\n        line-height:14px !important;\n    }\n\n    .footer-copyright {\n        font-size:10px !important;\n        line-height:15px !important;\n    }\n\n}\n\n</style>\n\n</head>\n\n\n<body\n    bgcolor=\"#f4f4f5\"\n    style=\"\n        margin:0;\n        padding:0;\n        background-color:#f4f4f5 !important;\n        font-family:Arial, 'Helvetica Neue', Helvetica, sans-serif;\n        color-scheme:light;\n    \"\n>\n\n<table\n    role=\"presentation\"\n    border=\"0\"\n    cellpadding=\"0\"\n    cellspacing=\"0\"\n    width=\"100%\"\n    bgcolor=\"#f4f4f5\"\n    style=\"\n        width:100%;\n        background-color:#f4f4f5 !important;\n    \"\n>\n\n<tr>\n\n<td\n    class=\"outer-pad\"\n    align=\"center\"\n    bgcolor=\"#f4f4f5\"\n    style=\"\n        padding:24px 0 40px 0;\n        background-color:#f4f4f5 !important;\n    \"\n>\n\n\n<!--[if mso]>\n<table\n    role=\"presentation\"\n    border=\"0\"\n    cellpadding=\"0\"\n    cellspacing=\"0\"\n    width=\"600\"\n    align=\"center\"\n>\n<tr>\n<td width=\"600\">\n<![endif]-->\n\n\n<table\n    role=\"presentation\"\n    border=\"0\"\n    cellpadding=\"0\"\n    cellspacing=\"0\"\n    width=\"600\"\n    bgcolor=\"#ffffff\"\n    class=\"email-container\"\n    style=\"\n        width:600px;\n        background-color:#ffffff;\n        border-radius:14px;\n        overflow:hidden;\n        border-collapse:separate !important;\n    \"\n>\n\n\n<!-- CABEÇALHO -->\n\n<tr>\n\n<td\n    class=\"header-cell\"\n    align=\"center\"\n    bgcolor=\"#000000\"\n    style=\"\n        padding:26px 15px;\n        background-color:#000000;\n        border-radius:13px 13px 0 0;\n    \"\n>\n\n<img\n    class=\"main-logo\"\n    src=\"${config.url_base_assets_email || 'https://assets.empresa.exemplo.com/email'}/logo-brand.png\"\n    alt=\"Empresa Exemplo\"\n    width=\"170\"\n    style=\"\n        display:block;\n        width:170px;\n        max-width:100%;\n        height:auto;\n        margin:0 auto;\n        border:0;\n    \"\n/>\n\n</td>\n\n</tr>\n\n\n<!-- IMAGEM PRINCIPAL -->\n\n<tr>\n\n<td\n    align=\"center\"\n    bgcolor=\"#ffffff\"\n    style=\"\n        padding:0;\n        margin:0;\n        background-color:#ffffff;\n        line-height:0;\n        font-size:0;\n    \"\n>\n\n<img\n    class=\"hero-image\"\n    src=\"${config.url_base_assets_email || 'https://assets.empresa.exemplo.com/email'}/hero-cobranca.png\"\n    alt=\"Relatório de Cobrança Preventiva\"\n    width=\"600\"\n    style=\"\n        display:block;\n        width:600px;\n        max-width:100%;\n        height:auto;\n        margin:0;\n        padding:0;\n        border:0;\n    \"\n/>\n\n</td>\n\n</tr>\n\n\n<!-- TÍTULO -->\n\n<tr>\n\n<td\n    class=\"content-pad\"\n    align=\"center\"\n    bgcolor=\"#ffffff\"\n    style=\"\n        padding:38px 35px 0 35px;\n        background-color:#ffffff;\n    \"\n>\n\n<h1\n    class=\"main-title\"\n    style=\"\n        margin:0;\n        color:#000000;\n        font-family:Arial, 'Helvetica Neue', Helvetica, sans-serif;\n        font-size:27px;\n        line-height:34px;\n        font-weight:700;\n        letter-spacing:-0.4px;\n        text-align:center;\n    \"\n>\n    Relatório de Cobrança Preventiva\n</h1>\n\n<p\n    class=\"subtitle\"\n    style=\"\n        margin:8px 0 0 0;\n        color:#aa8b10;\n        font-family:Arial, 'Helvetica Neue', Helvetica, sans-serif;\n        font-size:14px;\n        line-height:20px;\n        font-weight:700;\n        text-align:center;\n        text-transform:uppercase;\n    \"\n>\n    AUTOMAÇÃO D-10 E D-5\n</p>\n\n</td>\n\n</tr>\n\n\n<!-- DIVISOR DOURADO -->\n\n<tr>\n\n<td\n    align=\"center\"\n    bgcolor=\"#ffffff\"\n    style=\"\n        padding:14px 0 22px 0;\n        background-color:#ffffff;\n        font-size:0;\n        line-height:0;\n    \"\n>\n\n<table\n    role=\"presentation\"\n    border=\"0\"\n    cellpadding=\"0\"\n    cellspacing=\"0\"\n    width=\"142\"\n    align=\"center\"\n>\n\n<tr>\n\n<td width=\"45\" valign=\"middle\">\n\n<table\n    role=\"presentation\"\n    width=\"45\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n>\n\n<tr>\n\n<td\n    width=\"45\"\n    height=\"1\"\n    bgcolor=\"#aa8b10\"\n    style=\"\n        height:1px;\n        background-color:#aa8b10;\n        font-size:1px;\n        line-height:1px;\n    \"\n>\n    &#160;\n</td>\n\n</tr>\n\n</table>\n\n</td>\n\n\n<td width=\"16\">\n    &#160;\n</td>\n\n\n<td\n    width=\"20\"\n    align=\"center\"\n    valign=\"middle\"\n    style=\"\n        color:#aa8b10;\n        font-size:20px;\n        line-height:22px;\n    \"\n>\n    ◆\n</td>\n\n\n<td width=\"16\">\n    &#160;\n</td>\n\n\n<td width=\"45\" valign=\"middle\">\n\n<table\n    role=\"presentation\"\n    width=\"45\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n>\n\n<tr>\n\n<td\n    width=\"45\"\n    height=\"1\"\n    bgcolor=\"#aa8b10\"\n    style=\"\n        height:1px;\n        background-color:#aa8b10;\n        font-size:1px;\n        line-height:1px;\n    \"\n>\n    &#160;\n</td>\n\n</tr>\n\n</table>\n\n</td>\n\n</tr>\n\n</table>\n\n</td>\n\n</tr>\n\n\n<!-- CONTEÚDO -->\n\n<tr>\n\n<td\n    class=\"content-pad\"\n    align=\"left\"\n    bgcolor=\"#ffffff\"\n    style=\"\n        padding:0 60px 27px 60px;\n        background-color:#ffffff;\n    \"\n>\n\n<p\n    class=\"body-text\"\n    style=\"\n        margin:0 0 17px 0;\n        color:#161616;\n        font-family:Arial, 'Helvetica Neue', Helvetica, sans-serif;\n        font-size:16px;\n        line-height:24px;\n        font-weight:400;\n        text-align:left;\n    \"\n>\n    Prezados,\n</p>\n\n\n<p\n    class=\"body-text\"\n    style=\"\n        margin:0 0 17px 0;\n        color:#161616;\n        font-family:Arial, 'Helvetica Neue', Helvetica, sans-serif;\n        font-size:16px;\n        line-height:24px;\n        font-weight:400;\n        text-align:justify;\n    \"\n>\n    Informamos que a rotina diária da <strong>Automação de Cobrança Preventiva (D-10 e D-5)</strong> foi executada em <strong>${dataExecucaoBR}</strong>.\n</p>\n\n\n<p\n    class=\"body-text\"\n    style=\"\n        margin:0;\n        color:#161616;\n        font-family:Arial, 'Helvetica Neue', Helvetica, sans-serif;\n        font-size:16px;\n        line-height:24px;\n        font-weight:400;\n        text-align:justify;\n    \"\n>\n    A automação realiza o envio preventivo das cobranças via WhatsApp e identifica situações que necessitam de verificação ou correção cadastral.\n</p>\n\n</td>\n\n</tr>\n\n\n<!-- TÍTULO RESUMO -->\n\n<tr>\n\n<td\n    align=\"center\"\n    bgcolor=\"#ffffff\"\n    style=\"\n        padding:9px 30px 16px 30px;\n        background-color:#ffffff;\n    \"\n>\n\n<p\n    style=\"\n        margin:0;\n        color:#111111;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:16px;\n        line-height:22px;\n        font-weight:700;\n        text-align:center;\n    \"\n>\n    Resumo da execução\n</p>\n\n</td>\n\n</tr>\n\n\n<!-- INDICADORES -->\n\n<tr>\n\n<td\n    class=\"content-pad\"\n    align=\"center\"\n    bgcolor=\"#ffffff\"\n    style=\"\n        padding:0 45px 28px 45px;\n        background-color:#ffffff;\n    \"\n>\n\n<table\n    role=\"presentation\"\n    width=\"100%\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n>\n\n<tr>\n\n\n<!-- ENVIADAS -->\n\n<td\n    class=\"metric-cell\"\n    width=\"25%\"\n    valign=\"top\"\n    style=\"\n        width:25%;\n        padding:0 5px;\n    \"\n>\n\n<table\n    class=\"metric-table\"\n    role=\"presentation\"\n    width=\"100%\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n    bgcolor=\"#fbf8ef\"\n    style=\"\n        width:100%;\n        background-color:#fbf8ef;\n        border-radius:8px;\n        border-collapse:separate !important;\n    \"\n>\n\n<tr>\n\n<td\n    align=\"center\"\n    style=\"\n        padding:17px 7px;\n    \"\n>\n\n<p\n    style=\"\n        margin:0 0 5px 0;\n        color:#aa8b10;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:25px;\n        line-height:28px;\n        font-weight:700;\n    \"\n>\n    ${enviadas.length}\n</p>\n\n<p\n    style=\"\n        margin:0;\n        color:#444444;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:11px;\n        line-height:15px;\n        font-weight:600;\n    \"\n>\n    Enviadas<br />\n    via Z-API\n</p>\n\n</td>\n\n</tr>\n\n</table>\n\n</td>\n\n\n<!-- SEM WHATSAPP -->\n\n<td\n    class=\"metric-cell\"\n    width=\"25%\"\n    valign=\"top\"\n    style=\"\n        width:25%;\n        padding:0 5px;\n    \"\n>\n\n<table\n    class=\"metric-table\"\n    role=\"presentation\"\n    width=\"100%\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n    bgcolor=\"#fbf8ef\"\n    style=\"\n        width:100%;\n        background-color:#fbf8ef;\n        border-radius:8px;\n        border-collapse:separate !important;\n    \"\n>\n\n<tr>\n\n<td\n    align=\"center\"\n    style=\"\n        padding:17px 7px;\n    \"\n>\n\n<p\n    style=\"\n        margin:0 0 5px 0;\n        color:#aa8b10;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:25px;\n        line-height:28px;\n        font-weight:700;\n    \"\n>\n    ${semWhatsapp.length}\n</p>\n\n<p\n    style=\"\n        margin:0;\n        color:#444444;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:11px;\n        line-height:15px;\n        font-weight:600;\n    \"\n>\n    Sem<br />\n    WhatsApp\n</p>\n\n</td>\n\n</tr>\n\n</table>\n\n</td>\n\n\n<!-- FORMATO INVÁLIDO -->\n\n<td\n    class=\"metric-cell\"\n    width=\"25%\"\n    valign=\"top\"\n    style=\"\n        width:25%;\n        padding:0 5px;\n    \"\n>\n\n<table\n    class=\"metric-table\"\n    role=\"presentation\"\n    width=\"100%\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n    bgcolor=\"#fbf8ef\"\n    style=\"\n        width:100%;\n        background-color:#fbf8ef;\n        border-radius:8px;\n        border-collapse:separate !important;\n    \"\n>\n\n<tr>\n\n<td\n    align=\"center\"\n    style=\"\n        padding:17px 7px;\n    \"\n>\n\n<p\n    style=\"\n        margin:0 0 5px 0;\n        color:#aa8b10;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:25px;\n        line-height:28px;\n        font-weight:700;\n    \"\n>\n    ${pendentes.length}\n</p>\n\n<p\n    style=\"\n        margin:0;\n        color:#444444;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:11px;\n        line-height:15px;\n        font-weight:600;\n    \"\n>\n    Formato inválido<br />\n    ou vazio\n</p>\n\n</td>\n\n</tr>\n\n</table>\n\n</td>\n\n\n<!-- NÃO ENTREGUES -->\n\n<td\n    class=\"metric-cell\"\n    width=\"25%\"\n    valign=\"top\"\n    style=\"\n        width:25%;\n        padding:0 5px;\n    \"\n>\n\n<table\n    class=\"metric-table\"\n    role=\"presentation\"\n    width=\"100%\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n    bgcolor=\"#fbf8ef\"\n    style=\"\n        width:100%;\n        background-color:#fbf8ef;\n        border-radius:8px;\n        border-collapse:separate !important;\n    \"\n>\n\n<tr>\n\n<td\n    align=\"center\"\n    style=\"\n        padding:17px 7px;\n    \"\n>\n\n<p\n    style=\"\n        margin:0 0 5px 0;\n        color:#aa8b10;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:25px;\n        line-height:28px;\n        font-weight:700;\n    \"\n>\n    ${naoEntregues.length}\n</p>\n\n<p\n    style=\"\n        margin:0;\n        color:#444444;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:11px;\n        line-height:15px;\n        font-weight:600;\n    \"\n>\n    Não<br />\n    entregues\n</p>\n\n</td>\n\n</tr>\n\n</table>\n\n</td>\n\n\n</tr>\n\n</table>\n\n</td>\n\n</tr>\n\n\n<!-- ARQUIVO ANEXO -->\n\n<tr>\n\n<td\n    class=\"content-pad\"\n    align=\"center\"\n    bgcolor=\"#ffffff\"\n    style=\"\n        padding:0 60px 29px 60px;\n        background-color:#ffffff;\n    \"\n>\n\n<p\n    style=\"\n        margin:0;\n        color:#000000;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:13px;\n        line-height:19px;\n        font-weight:700;\n        text-align:center;\n    \"\n>\n    O relatório completo desta execução está disponível no <strong>arquivo anexo a este e-mail</strong>.\n</p>\n\n</td>\n\n</tr>\n\n\n<!-- LINHA -->\n\n<tr>\n\n<td\n    class=\"content-pad\"\n    align=\"center\"\n    bgcolor=\"#ffffff\"\n    style=\"\n        padding:0 60px 21px 60px;\n        background-color:#ffffff;\n    \"\n>\n\n<table\n    role=\"presentation\"\n    width=\"100%\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n>\n\n<tr>\n\n<td\n    height=\"1\"\n    bgcolor=\"#e4e4e4\"\n    style=\"\n        height:1px;\n        background-color:#e4e4e4;\n        font-size:1px;\n        line-height:1px;\n    \"\n>\n    &#160;\n</td>\n\n</tr>\n\n</table>\n\n</td>\n\n</tr>\n\n\n<!-- ASSINATURA -->\n\n<tr>\n\n<td\n    align=\"center\"\n    bgcolor=\"#ffffff\"\n    style=\"\n        padding:0 25px 29px 25px;\n        background-color:#ffffff;\n    \"\n>\n\n<p\n    style=\"\n        margin:0 0 5px 0;\n        color:#222222;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:14px;\n        line-height:19px;\n        font-weight:400;\n    \"\n>\n    Atenciosamente,\n</p>\n\n<p\n    style=\"\n        margin:0 0 3px 0;\n        color:#aa8b10;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:14px;\n        line-height:19px;\n        font-weight:700;\n    \"\n>\n    Equipe de Tecnologia e Inovação\n</p>\n\n<p\n    style=\"\n        margin:0;\n        color:#111111;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:14px;\n        line-height:19px;\n        font-weight:700;\n    \"\n>\n    Empresa Exemplo\n</p>\n\n</td>\n\n</tr>\n\n\n<!-- RODAPÉ -->\n\n<tr>\n\n<td\n    align=\"center\"\n    bgcolor=\"#000000\"\n    style=\"\n        background-color:#000000;\n        padding:20px 20px 18px 20px;\n        border-radius:0 0 12px 12px;\n        font-family:Arial,Helvetica,sans-serif;\n    \"\n>\n\n<div\n    class=\"footer-copyright\"\n    style=\"\n        margin:0;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:10px;\n        line-height:15px;\n        color:#7d8982;\n        text-align:center;\n    \"\n>\n    © ${anoExecucao} Empresa Exemplo. Todos os direitos reservados.\n</div>\n\n\n<div\n    style=\"\n        height:16px;\n        line-height:16px;\n        font-size:16px;\n    \"\n>\n    &nbsp;\n</div>\n\n\n<table\n    role=\"presentation\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n    align=\"center\"\n>\n\n<tr>\n\n\n<!-- FACEBOOK -->\n\n<td\n    align=\"center\"\n    valign=\"middle\"\n    style=\"\n        padding:0 5px 0 0;\n        line-height:0;\n    \"\n>\n\n<img\n    src=\"${config.url_base_assets_email || 'https://assets.empresa.exemplo.com/email'}/icon-facebook.png\"\n    width=\"17\"\n    alt=\"Facebook\"\n    style=\"\n        display:block;\n        width:17px;\n        height:auto;\n        border:0;\n    \"\n/>\n\n</td>\n\n\n<!-- LINKEDIN -->\n\n<td\n    align=\"center\"\n    valign=\"middle\"\n    style=\"\n        padding:0 5px 7px 5px;\n        line-height:0;\n    \"\n>\n\n<a\n    href=\"https://www.linkedin.com/company/empresa-exemplo/\"\n    target=\"_blank\"\n    style=\"\n        text-decoration:none;\n    \"\n>\n\n<img\n    src=\"${config.url_base_assets_email || 'https://assets.empresa.exemplo.com/email'}/icon-linkedin.png\"\n    width=\"17\"\n    alt=\"LinkedIn\"\n    style=\"\n        display:block;\n        width:17px;\n        height:auto;\n        border:0;\n    \"\n/>\n\n</a>\n\n</td>\n\n\n<!-- INSTAGRAM -->\n\n<td\n    align=\"center\"\n    valign=\"middle\"\n    style=\"\n        padding:0 12px 5px 5px;\n        line-height:0;\n    \"\n>\n\n<img\n    src=\"${config.url_base_assets_email || 'https://assets.empresa.exemplo.com/email'}/icon-instagram.png\"\n    width=\"17\"\n    alt=\"Instagram\"\n    style=\"\n        display:block;\n        width:17px;\n        height:auto;\n        border:0;\n    \"\n/>\n\n</td>\n\n\n<!-- SOBRE NÓS -->\n\n<td\n    class=\"footer-link\"\n    valign=\"middle\"\n    style=\"\n        padding:0 7px 0 0;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:10px;\n        line-height:15px;\n        font-weight:600;\n        color:#7d8982;\n        text-decoration:underline;\n    \"\n>\n    Sobre Nós\n</td>\n\n\n<td\n    valign=\"middle\"\n    style=\"\n        padding:0 7px 0 0;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:10px;\n        color:#59635d;\n    \"\n>\n    |\n</td>\n\n\n<!-- INTRANET -->\n\n<td\n    class=\"footer-link\"\n    valign=\"middle\"\n    style=\"\n        padding:0 7px 0 0;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:10px;\n        line-height:15px;\n        font-weight:600;\n    \"\n>\n\n<a\n    href=\"https://intranet.empresa.exemplo.com/\"\n    target=\"_blank\"\n    style=\"\n        color:#7d8982;\n        text-decoration:underline;\n    \"\n>\n    Intranet\n</a>\n\n</td>\n\n\n<td\n    valign=\"middle\"\n    style=\"\n        padding:0 7px 0 0;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:10px;\n        color:#59635d;\n    \"\n>\n    |\n</td>\n\n\n<!-- POLÍTICA -->\n\n<td\n    class=\"footer-link\"\n    valign=\"middle\"\n    style=\"\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:10px;\n        line-height:15px;\n        font-weight:600;\n        color:#7d8982;\n        text-decoration:underline;\n    \"\n>\n    Política de Privacidade\n</td>\n\n</tr>\n\n</table>\n\n\n<div\n    style=\"\n        height:17px;\n        line-height:17px;\n        font-size:17px;\n    \"\n>\n    &nbsp;\n</div>\n\n\n<div\n    class=\"footer-note\"\n    style=\"\n        margin:0 auto;\n        max-width:390px;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:10px;\n        line-height:14px;\n        color:#6f7973;\n        text-align:center;\n    \"\n>\n    Este e-mail foi enviado de uma conta que apenas envia notificações e não pode receber respostas.\n</div>\n\n\n<div\n    style=\"\n        height:6px;\n        line-height:6px;\n        font-size:6px;\n    \"\n>\n    &nbsp;\n</div>\n\n\n<div\n    class=\"footer-note\"\n    style=\"\n        margin:0 auto;\n        font-family:Arial,Helvetica,sans-serif;\n        font-size:10px;\n        line-height:14px;\n        color:#6f7973;\n        text-align:center;\n    \"\n>\n    Por favor, não responda.\n</div>\n\n\n</td>\n\n</tr>\n\n</table>\n\n\n<!--[if mso]>\n</td>\n</tr>\n</table>\n<![endif]-->\n\n\n</td>\n\n</tr>\n\n</table>\n\n</body>\n\n</html>`;\n\nreturn [\n  {\n    json: {\n      data_execucao: dataExecucao,\n      data_execucao_br: dataExecucaoBR,\n      nome_arquivo_excel: `Relatorio_Cobranca_Preventiva_${dataExecucao}.xlsx`,\n      total_processados: todosProcessados.length,\n      total_enviadas: enviadas.length,\n      total_sem_whatsapp: semWhatsapp.length,\n      total_pendentes: pendentes.length,\n      total_nao_entregues: naoEntregues.length,\n      possui_falhas_ou_pendentes: falhasEPendencias.length > 0,\n      destinatarios_nomes: destinatariosNomes,\n      destinatarios_email_csv: destinatariosEmails,\n      copias_nomes: copiasNomes,\n      copias_email_csv: copiasEmails,\n      assunto_email: `AUTOMAÇÃO DE COBRANÇA PREVENTIVA WHATSAPP (${dataExecucaoBR}) - ${falhasEPendencias.length} pendência(s)`,\n      html_relatorio: htmlRelatorio,\n      linhas_excel: linhasExcelPadronizadas\n    }\n  }\n];"
+      },
+      "id": "00000000-0000-0000-0000-000000000028",
+      "name": "19. Consolidar Relatório",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        12288,
+        4704
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Desempacota as linhas padronizadas em itens individuais para que o nó\n// Convert to File (.xlsx) gere a planilha com cabeçalhos limpos e organizados.\nconst linhas = $input.first()?.json?.linhas_excel || [];\nif (linhas.length === 0) {\n  return [\n    {\n      json: {\n        \"Loja (CODI_EMP)\": \"-\",\n        \"CODI_TRA\": \"-\",\n        \"Cliente (RAZA_TRA)\": \"Nenhuma notificação processada na execução\",\n        \"Status\": \"-\",\n        \"Repescagem Automática?\": \"-\",\n        \"Tentativa Nº\": 0,\n        \"Telefone Cadastrado (ERP_PARCEIROS)\": \"-\",\n        \"Telefone Padronizado (WhatsApp)\": \"-\",\n        \"Etapa\": \"-\",\n        \"Vencimento (VENC_REC)\": \"-\",\n        \"Qtd. Títulos\": 0,\n        \"Valor Bruto Vencimento (R$)\": 0,\n        \"Crédito Abatido FIFO (R$)\": 0,\n        \"Saldo Devedor Resultante (R$)\": 0,\n        \"Saldo Devedor Formatado\": \"R$ 0,00\",\n        \"Data Prevista Notificação\": \"-\",\n        \"Data Efetiva Execução\": \"-\",\n        \"Antecipado Dia Útil?\": \"-\",\n        \"Prorrogação Detectada?\": \"-\",\n        \"Motivo / Diagnóstico\": \"-\",\n        \"Código de Erro\": \"-\",\n        \"ID Mensagem Z-API\": \"-\"\n      }\n    }\n  ];\n}\nreturn linhas.map(linha => ({ json: linha }));"
+      },
+      "id": "00000000-0000-0000-0000-000000000029",
+      "name": "19b. Estruturar Planilha",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        12544,
+        4704
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {
+          "fileName": "={{ $('19. Consolidar Relatório').first().json.nome_arquivo_excel }}",
+          "headerRow": true,
+          "sheetName": "Relatório Cobrança D-10 e D-5"
+        }
+      },
+      "id": "00000000-0000-0000-0000-000000000030",
+      "name": "19c. Gerar Excel",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        12800,
+        4704
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "01. Agendador Diário": {
+      "main": [
+        [
+          {
+            "node": "02. Parâmetros Globais",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02. Parâmetros Globais": {
+      "main": [
+        [
+          {
+            "node": "03. Buscar Feriados",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "03. Buscar Feriados": {
+      "main": [
+        [
+          {
+            "node": "04. Validar Calendário",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04. Validar Calendário": {
+      "main": [
+        [
+          {
+            "node": "05. Dia Útil?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "05. Dia Útil?": {
+      "main": [
+        [
+          {
+            "node": "06. Extrair Títulos",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "21. Registrar Telemetria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "06. Extrair Títulos": {
+      "main": [
+        [
+          {
+            "node": "07. Há Títulos?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "07. Há Títulos?": {
+      "main": [
+        [
+          {
+            "node": "08. Consultar Histórico",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "21. Registrar Telemetria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "08. Consultar Histórico": {
+      "main": [
+        [
+          {
+            "node": "09. Motor FIFO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "09. Motor FIFO": {
+      "main": [
+        [
+          {
+            "node": "12. Há Envios?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "12. Há Envios?": {
+      "main": [
+        [
+          {
+            "node": "13. Lote Individual",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "21. Registrar Telemetria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "13. Lote Individual": {
+      "main": [
+        [
+          {
+            "node": "19. Consolidar Relatório",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "14. Telefone Válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "14. Telefone Válido?": {
+      "main": [
+        [
+          {
+            "node": "14b. Verificar WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "16. Classificar Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "14b. Verificar WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "14c. Possui WhatsApp?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "14c. Possui WhatsApp?": {
+      "main": [
+        [
+          {
+            "node": "15. Enviar WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "16. Classificar Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "15. Enviar WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "16. Classificar Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "16. Classificar Status": {
+      "main": [
+        [
+          {
+            "node": "17. Registrar Auditoria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "17. Registrar Auditoria": {
+      "main": [
+        [
+          {
+            "node": "17b. Preservar Contexto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "17b. Preservar Contexto": {
+      "main": [
+        [
+          {
+            "node": "18. Espera Anti-Ban",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "18. Espera Anti-Ban": {
+      "main": [
+        [
+          {
+            "node": "13. Lote Individual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "19. Consolidar Relatório": {
+      "main": [
+        [
+          {
+            "node": "19b. Estruturar Planilha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "19b. Estruturar Planilha": {
+      "main": [
+        [
+          {
+            "node": "19c. Gerar Excel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "19c. Gerar Excel": {
+      "main": [
+        [
+          {
+            "node": "20. Enviar Relatório",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "20. Enviar Relatório": {
+      "main": [
+        [
+          {
+            "node": "21. Registrar Telemetria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "{{WORKFLOW_ID_ERROR_HANDLER}}",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "00000000-0000-0000-0000-000000000000",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "nodeGroups": [],
+  "id": "WORKFLOW_ID_MAIN",
+  "tags": [],
+  "staticData": null
+}
